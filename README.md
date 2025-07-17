@@ -150,7 +150,7 @@ Watch the logs and monitor dashboard for real-time updates.
 ## 👨‍💻 Authors
 
 **Sayan Sarkar**  
-GitHub: [psyoherion](https://github.com/psyoherion)  
+GitHub: [psyoherion](https://github.com/psypherion)  
 Email: [williamskyle562@gmail.com](mailto:williamskyle562@gmail.com)
 
 ---
