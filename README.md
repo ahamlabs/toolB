@@ -136,6 +136,8 @@ curl -X POST http://localhost:8080/api/data -d '{"id": 1}' &
 Watch the logs and monitor dashboard for real-time updates.
 
 ---
+<img width="2940" height="1912" alt="image" src="https://github.com/user-attachments/assets/184263ea-d24a-4921-a0d2-ff16629a9b99" />
+
 
 ## 🛣️ Future Roadmap
 
@@ -148,7 +150,7 @@ Watch the logs and monitor dashboard for real-time updates.
 ## 👨‍💻 Authors
 
 **Sayan Sarkar**  
-GitHub: [psyoherion](https://github.com/psyoherion)  
+GitHub: [psyoherion](https://github.com/psypherion)  
 Email: [williamskyle562@gmail.com](mailto:williamskyle562@gmail.com)
 
 ---
