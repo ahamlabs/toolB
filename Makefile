@@ -21,7 +21,7 @@ all: $(TARGET)
 # Rule to link the final executable
 $(TARGET): $(C_OBJS)
 	@mkdir -p $(BIN_DIR)
-	$(CC) -o $(TARGET) $(C_OBJS) $(CFLAGS) # Added CFLAGS here for linking
+	$(CC) -o $(TARGET) $(C_OBJS) $(CFLAGS)
 	@echo "✅ toolB Concurrent Server compiled successfully -> $(TARGET)"
 
 # Generic rule to compile any .c file into a .o file
@@ -30,12 +30,13 @@ $(TARGET): $(C_OBJS)
 
 # --- Target Commands ---
 run-server: all
-	@echo "🚀 Starting toolB Concurrent Server..."
+	@echo "🚀 Starting toolB C-Server..."
 	@./$(TARGET)
 
+# UPDATED: This target now runs the new main.py application runner
 run-app:
-	@echo "🐍 Starting Python Application..."
-	@python3 $(APP_DIR)/toolb_app.py
+	@echo "🐍 Starting Python Application Server..."
+	@python3 $(APP_DIR)/main.py
 
 run-monitor:
 	@echo "📊 Starting Live Monitor..."
