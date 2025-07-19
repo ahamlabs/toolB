@@ -22,6 +22,7 @@ all: $(TARGET)
 $(TARGET): $(C_OBJS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) -o $(TARGET) $(C_OBJS) $(CFLAGS)
+	$(CC) -o $(TARGET) $(C_OBJS) $(CFLAGS) $(LIBS)
 	@echo "✅ toolB Concurrent Server compiled successfully -> $(TARGET)"
 
 # Generic rule to compile any .c file into a .o file
