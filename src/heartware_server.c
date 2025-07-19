@@ -4,7 +4,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
-#include <pthread.h> // For multi-threading
+#include <pthread.h>
+#include <semaphore.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -12,6 +13,7 @@
 
 // --- Globals ---
 SharedMemoryLayout* shm_ptr = NULL;
+sem_t* request_sem = SEM_FAILED; // Global for the semaphore
 int server_fd = -1;
 volatile uint64_t request_id_counter = 0;
 pthread_mutex_t request_id_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -32,8 +34,12 @@ typedef struct {
 void cleanup_on_signal(int signum) {
     printf("\n🛡️  [Server] Signal %d received. Shutting down...\n", signum);
     if (shm_ptr != NULL) munmap(shm_ptr, sizeof(SharedMemoryLayout));
+    if (request_sem != SEM_FAILED) {
+        sem_close(request_sem); // Close the semaphore
+    }
     if (server_fd != -1) close(server_fd);
     shm_unlink(SHM_NAME);
+    sem_unlink(SEM_REQUEST_READY); // Unlink semaphore from the system
     pthread_mutex_destroy(&request_id_mutex);
     pthread_mutex_destroy(&request_buffer_mutex);
     pthread_mutex_destroy(&response_buffer_mutex);
@@ -48,16 +54,8 @@ void* handle_connection(void* args_ptr) {
     uint64_t request_id = args->request_id;
     free(args);
 
-    printf("THREAD %llu: Handling new connection.\n", request_id);
-
     char buffer[BODY_LEN * 2] = {0};
-    ssize_t bytes_read = read(client_socket, buffer, sizeof(buffer) - 1);
-    if (bytes_read <= 0) {
-        fprintf(stderr, "THREAD %llu: Failed to read from socket or client disconnected.\n", request_id);
-        close(client_socket);
-        return NULL;
-    }
-    printf("THREAD %llu: Read %zd bytes from socket.\n", request_id, bytes_read);
+    read(client_socket, buffer, sizeof(buffer) - 1);
 
     // --- CRITICAL SECTION for writing to request buffer ---
     pthread_mutex_lock(&request_buffer_mutex);
@@ -69,7 +67,12 @@ void* handle_connection(void* args_ptr) {
     shm_ptr->request_buffer.head = (req_head + 1) % REQ_BUFFER_CAPACITY;
     pthread_mutex_unlock(&request_buffer_mutex);
 
-    printf("➡️  [Thread %llu] Request sent to Python app. Path: %s\n", request_id, msg->path);
+    // --- Signal Python that a new request is ready ---
+    if (sem_post(request_sem) == -1) {
+        perror("FATAL: sem_post failed");
+    }
+
+    printf("➡️  [Thread %llu] Request sent and signaled. Path: %s\n", request_id, msg->path);
 
     // --- Wait for a response from Python ---
     while(1) {
@@ -78,7 +81,6 @@ void* handle_connection(void* args_ptr) {
         if (shm_ptr->response_buffer.tail != shm_ptr->response_buffer.head) {
             ResponseMessage* res = &shm_ptr->response_buffer.responses[shm_ptr->response_buffer.tail % RES_BUFFER_CAPACITY];
             if (res->request_id == request_id) {
-                printf("⬅️  [Thread %llu] Response received. Sending to client.\n", request_id);
                 char http_response[RESPONSE_LEN];
                 snprintf(http_response, RESPONSE_LEN,
                          "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
@@ -104,38 +106,39 @@ int main() {
     signal(SIGINT, cleanup_on_signal);
 
     // 1. Setup Shared Memory
-    printf("INFO: Initializing shared memory...\n");
     int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd < 0) { perror("FATAL: shm_open failed"); exit(EXIT_FAILURE); }
-    if (ftruncate(shm_fd, sizeof(SharedMemoryLayout)) == -1) { perror("FATAL: ftruncate failed"); exit(EXIT_FAILURE); }
+    ftruncate(shm_fd, sizeof(SharedMemoryLayout));
     shm_ptr = (SharedMemoryLayout*)mmap(NULL, sizeof(SharedMemoryLayout), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shm_ptr == MAP_FAILED) { perror("FATAL: mmap failed"); exit(EXIT_FAILURE); }
     memset(shm_ptr, 0, sizeof(SharedMemoryLayout));
     printf("✅ [Server] Shared memory initialized.\n");
 
-    // 2. Setup TCP Socket Server
-    printf("INFO: Setting up socket server...\n");
+    // 2. Setup Semaphore
+    printf("INFO: Initializing request semaphore...\n");
+    sem_unlink(SEM_REQUEST_READY); // Clean up from any previous unclean shutdowns
+    request_sem = sem_open(SEM_REQUEST_READY, O_CREAT, 0666, 0); // Initial value of 0
+    if (request_sem == SEM_FAILED) {
+        perror("FATAL: sem_open failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("✅ [Server] Semaphore initialized.\n");
+
+    // 3. Setup TCP Socket Server
     struct sockaddr_in address;
     int opt = 1;
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) { perror("FATAL: socket failed"); exit(EXIT_FAILURE); }
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) { perror("FATAL: setsockopt failed"); exit(EXIT_FAILURE); }
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(8080);
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) { perror("FATAL: bind failed"); exit(EXIT_FAILURE); }
-    if (listen(server_fd, 30) < 0) { perror("FATAL: listen failed"); exit(EXIT_FAILURE); }
+    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    listen(server_fd, 30);
     printf("✅ [Server] Listening on http://localhost:8080\n");
 
     while (1) {
-        printf("👂 [Server] Waiting for a new connection...\n");
         int client_socket = accept(server_fd, NULL, NULL);
-        if (client_socket < 0) {
-            perror("WARN: accept failed");
-            continue; // Don't crash the server, just wait for the next connection
-        }
+        if (client_socket < 0) continue;
 
         thread_args_t* args = malloc(sizeof(thread_args_t));
-        if (!args) { perror("FATAL: malloc for thread args failed"); close(client_socket); continue; }
         args->client_socket = client_socket;
 
         pthread_mutex_lock(&request_id_mutex);
@@ -143,11 +146,7 @@ int main() {
         pthread_mutex_unlock(&request_id_mutex);
 
         pthread_t worker_thread;
-        if (pthread_create(&worker_thread, NULL, handle_connection, (void*)args) != 0) {
-            perror("WARN: pthread_create failed");
-            free(args);
-            close(client_socket);
-        }
+        pthread_create(&worker_thread, NULL, handle_connection, (void*)args);
         pthread_detach(worker_thread);
     }
     return 0;
