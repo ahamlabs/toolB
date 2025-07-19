@@ -127,7 +127,7 @@ With all components running, open a fourth terminal to send requests using `curl
   curl -X POST http://localhost:8080/api/data -d '{"id": 1}' &
   ```
 
-![img.png](img.png)
+<img width="1470" height="956" alt="image" src="https://github.com/user-attachments/assets/c93503aa-5c4b-4322-afcf-27dcfcef62a1" />
 
 ## 🛣️ Future Roadmap
 
