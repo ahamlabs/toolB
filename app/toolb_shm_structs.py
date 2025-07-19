@@ -4,12 +4,14 @@ import ctypes
 REQ_BUFFER_CAPACITY = 16
 RES_BUFFER_CAPACITY = 16
 SHM_NAME = "/toolb_ipc"
+SEM_REQUEST_READY = "/toolb_sem_req"
 
+# --- Field Lengths ---
 METHOD_LEN = 8
 PATH_LEN = 256
 QUERY_PARAMS_LEN = 256
 CONTENT_TYPE_LEN = 128
-BOUNDARY_LEN = 70 # New field
+BOUNDARY_LEN = 70
 AUTH_HEADER_LEN = 256
 BODY_LEN = 4096
 RESPONSE_LEN = 4096
@@ -22,7 +24,7 @@ class RequestMessage(ctypes.Structure):
         ("path", ctypes.c_char * PATH_LEN),
         ("query_params", ctypes.c_char * QUERY_PARAMS_LEN),
         ("content_type", ctypes.c_char * CONTENT_TYPE_LEN),
-        ("boundary", ctypes.c_char * BOUNDARY_LEN), # New field
+        ("boundary", ctypes.c_char * BOUNDARY_LEN),
         ("authorization", ctypes.c_char * AUTH_HEADER_LEN),
         ("content_length", ctypes.c_int),
         ("body", ctypes.c_char * BODY_LEN),
