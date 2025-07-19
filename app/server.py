@@ -6,126 +6,171 @@ import time
 import json
 import signal
 import asyncio
-from toolb_shm_structs import SharedMemoryLayout, REQ_BUFFER_CAPACITY, RES_BUFFER_CAPACITY, SHM_NAME
+import multiprocessing
+import importlib
+from toolb_shm_structs import SharedMemoryLayout, REQ_BUFFER_CAPACITY, RES_BUFFER_CAPACITY, SHM_NAME, SEM_REQUEST_READY
+
+# --- C Function Wrappers for Semaphores ---
+if sys.platform != 'win32':
+    libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith('linux') else "libc.dylib")
+    sem_open = libc.sem_open
+    sem_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    sem_open.restype = ctypes.c_void_p
+    sem_trywait = libc.sem_trywait
+    sem_trywait.argtypes = [ctypes.c_void_p]
+    sem_trywait.restype = ctypes.c_int
+    sem_close = libc.sem_close
+    sem_close.argtypes = [ctypes.c_void_p]
+    sem_close.restype = ctypes.c_int
+else:
+    sem_open = sem_trywait = sem_close = None
+
+# --- Worker Process Function ---
+def worker_process(app_path, task_queue, response_queue):
+    module_str, app_str = app_path.split(":")
+    module = importlib.import_module(module_str)
+    app = getattr(module, app_str)
+
+    print(f"✅ [Worker {os.getpid()}] Started.")
+    while True:
+        request_data = task_queue.get()
+        if request_data is None:
+            break
+
+        response_data = asyncio.run(_asgi_dispatch(app, request_data))
+        response_queue.put(response_data)
+
+    print(f"🛑 [Worker {os.getpid()}] Shutting down.")
+
+async def _asgi_dispatch(app, request_data):
+    response_future = asyncio.Future()
+    response_dict = {}
+
+    async def receive():
+        return {'type': 'http.request', 'body': request_data['body'], 'more_body': False}
+
+    async def send(message):
+        if message['type'] == 'http.response.start':
+            response_dict['status'] = message['status']
+        elif message['type'] == 'http.response.body':
+            response_dict['body'] = message.get('body', b'')
+            if not response_future.done():
+                response_future.set_result(response_dict)
+
+    scope = request_data['scope']
+    await app(scope, receive, send)
+
+    final_response = await response_future
+    final_response['request_id'] = request_data['request_id']
+    return final_response
 
 class ToolBServer:
-    """
-    An application server that runs an ASGI application (like FastAPI)
-    using the toolB high-performance C server and shared memory IPC.
-    """
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, app_path):
+        self.app_path = app_path
         self.shm = None
         self.req_buffer = None
         self.res_buffer = None
+        self.request_sem = None
         self.running = True
-        signal.signal(signal.SIGINT, self._handle_shutdown)
+        self.processes = []
 
-    def _handle_shutdown(self, signum, frame):
-        print("\n🐍 [Server] Signal received. Shutting down gracefully...")
-        self.running = False
-
-    def _connect_to_shm(self):
-        """Connects to the shared memory segment created by the C server."""
-        libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith('linux') else "libc.dylib")
-        shm_open = libc.shm_open
-        shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-        shm_open.restype = ctypes.c_int
-
-        try:
-            O_RDWR = os.O_RDWR
-        except AttributeError:
-            O_RDWR = 2
-
-        fd = shm_open(SHM_NAME.encode('utf-8'), O_RDWR, 0o666)
-        if fd < 0:
-            print("🔴 [Server] Shared memory not found. Is heartware_server running?")
-            sys.exit(1)
-
+    def _connect_to_ipc(self):
+        shm_open_c = libc.shm_open
+        shm_open_c.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+        shm_open_c.restype = ctypes.c_int
+        O_RDWR = 2
+        fd = shm_open_c(SHM_NAME.encode('utf-8'), O_RDWR, 0o666)
+        if fd < 0: sys.exit(1)
         mm = mmap.mmap(fd, ctypes.sizeof(SharedMemoryLayout), mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
         self.shm = SharedMemoryLayout.from_buffer(mm)
         self.req_buffer = self.shm.request_buffer
         self.res_buffer = self.shm.response_buffer
-        print("✅ [Server] Connected to shared memory.")
+        self.request_sem = sem_open(SEM_REQUEST_READY.encode('utf-8'), O_RDWR)
+        if self.request_sem == -1: sys.exit(1)
+        print("✅ [Dispatcher] Connected to IPC.")
 
-    async def _asgi_dispatch(self, request):
-        """
-        Translates a toolB RequestMessage into an ASGI scope and calls the
-        ASGI application.
-        """
-        response_future = asyncio.Future()
-        response_data = {}
+    def run(self, num_workers=None):
+        if sys.platform == 'win32':
+            raise NotImplementedError("toolB server is not supported on Windows.")
 
-        async def receive():
-            return {
-                'type': 'http.request',
-                'body': request.body,
-                'more_body': False
-            }
+        if num_workers is None:
+            num_workers = os.cpu_count()
 
-        async def send(message):
-            if message['type'] == 'http.response.start':
-                response_data['status'] = message['status']
-                response_data['headers'] = message.get('headers', [])
-            elif message['type'] == 'http.response.body':
-                response_data['body'] = message.get('body', b'')
-                if not response_future.done():
-                    response_future.set_result(response_data)
+        print(f"🚀 [Dispatcher] Starting server with {num_workers} worker processes.")
 
-        scope = {
-            'type': 'http',
-            'asgi': {'version': '3.0'},
-            'http_version': '1.1',
-            'server': ('127.0.0.1', 8080),
-            'client': ('127.0.0.1', 9999),
-            'scheme': 'http',
-            'method': request.method.decode(),
-            'path': request.path.decode(),
-            'query_string': request.query_params.decode().encode(),
-            'headers': [
-                (b'content-type', request.content_type.decode().encode()),
-                (b'authorization', request.authorization.decode().encode())
-            ]
-        }
+        self._connect_to_ipc()
 
-        await self.app(scope, receive, send)
-        return await response_future
+        task_queue = multiprocessing.Queue()
+        response_queue = multiprocessing.Queue()
 
-    def run(self):
-        """The main server loop."""
-        self._connect_to_shm()
+        for _ in range(num_workers):
+            p = multiprocessing.Process(target=worker_process, args=(self.app_path, task_queue, response_queue))
+            self.processes.append(p)
+            p.start()
+
+        def handle_shutdown(signum, frame):
+            print("\n🐍 [Dispatcher] Signal received. Shutting down...")
+            self.running = False
+
+        signal.signal(signal.SIGINT, handle_shutdown)
 
         while self.running:
-            # Always read the latest head from the C server
-            current_head = self.req_buffer.head
-            current_tail = self.req_buffer.tail
+            # --- Step 1: Always process responses first to prevent deadlock ---
+            try:
+                while not response_queue.empty():
+                    response_data = response_queue.get_nowait()
+                    res_head = self.res_buffer.head
+                    response_index = res_head % RES_BUFFER_CAPACITY
+                    response_msg = self.res_buffer.responses[response_index]
+                    response_msg.request_id = response_data['request_id']
+                    response_msg.status_code = response_data.get('status', 500)
+                    response_msg.body = response_data.get('body', b'')
+                    self.res_buffer.head = (res_head + 1) % RES_BUFFER_CAPACITY
+                    print(f"➡️  [Dispatcher] Sent response #{response_msg.request_id} to C.")
+            except multiprocessing.queues.Empty:
+                pass # This is expected, just means the queue is empty
 
-            # Check if there's a new request to process
-            if current_tail != current_head:
-                # Use modulo for array access
-                request_index = current_tail % REQ_BUFFER_CAPACITY
-                request = self.req_buffer.requests[request_index]
+            # --- Step 2: Check for new requests from the C server ---
+            if sem_trywait(self.request_sem) == 0:
+                # A signal was received, so process the request buffer
+                current_head = self.req_buffer.head
+                current_tail = self.req_buffer.tail
 
-                print(f"⬅️  [Server] Received request #{request.request_id} from C.")
+                while current_tail != current_head:
+                    request_index = current_tail % REQ_BUFFER_CAPACITY
+                    request = self.req_buffer.requests[request_index]
 
-                response_data = asyncio.run(self._asgi_dispatch(request))
+                    scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'server': ('127.0.0.1', 8080), 'client': ('127.0.0.1', 9999), 'scheme': 'http', 'method': request.method.decode(), 'path': request.path.decode(), 'query_string': request.query_params.decode().encode(), 'headers': []}
 
-                # Use modulo for array access
-                res_head = self.res_buffer.head
-                response_index = res_head % RES_BUFFER_CAPACITY
-                response_msg = self.res_buffer.responses[response_index]
+                    task_data = {
+                        'request_id': request.request_id,
+                        'scope': scope,
+                        'body': request.body
+                    }
+                    task_queue.put(task_data)
 
-                response_msg.request_id = request.request_id
-                response_msg.status_code = response_data.get('status', 500)
-                response_msg.body = response_data.get('body', b'')
+                    current_tail = (current_tail + 1) % REQ_BUFFER_CAPACITY
+                    print(f"📨 [Dispatcher] Dispatched request #{request.request_id} to workers.")
 
-                # DEFINITIVE FIX: Update pointers using modulo arithmetic to match the C server.
-                # This ensures both processes stay perfectly synchronized.
-                self.res_buffer.head = (res_head + 1) % RES_BUFFER_CAPACITY
-                self.req_buffer.tail = (current_tail + 1) % REQ_BUFFER_CAPACITY
-
-                print(f"➡️  [Server] Sent response #{request.request_id} to C.")
+                self.req_buffer.tail = current_tail
             else:
-                time.sleep(0.01)
+                # No signal from C server, sleep briefly to prevent busy-looping
+                time.sleep(0.001)
 
-        print("✅ [Server] Shutdown complete.")
+        # --- Robust Shutdown Sequence ---
+        print("🛑 [Dispatcher] Terminating worker processes...")
+        for _ in self.processes:
+            task_queue.put(None)
+
+        for p in self.processes:
+            p.join(timeout=2)
+
+        for p in self.processes:
+            if p.is_alive():
+                print(f"⚠️  [Dispatcher] Worker {p.pid} did not exit gracefully. Terminating.")
+                p.terminate()
+                p.join()
+
+        if self.request_sem:
+            sem_close(self.request_sem)
+        print("✅ [Dispatcher] Shutdown complete.")

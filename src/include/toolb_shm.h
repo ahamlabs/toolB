@@ -7,6 +7,7 @@
 #define REQ_BUFFER_CAPACITY 16
 #define RES_BUFFER_CAPACITY 16
 #define SHM_NAME "/toolb_ipc"
+#define SEM_REQUEST_READY "/toolb_sem_req" //
 
 // --- Data Structures ---
 #define METHOD_LEN 8
