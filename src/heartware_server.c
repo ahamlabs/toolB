@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include "include/toolb_shm.h"
+#include "include/config.h" // For config file handling
 
 // --- Globals ---
 SharedMemoryLayout* shm_ptr = NULL;
@@ -24,27 +25,42 @@ pthread_mutex_t request_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t request_buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t response_buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define REQUEST_TIMEOUT_SECONDS 30
+// --- Externs from config.c ---
+extern AppConfig config;
+extern void load_config(const char* filename);
+
+// --- Function Prototypes ---
+extern void http_parse_request(RequestMessage* msg, const char* request_str);
+void* handle_connection(void* client_socket_ptr);
+
+// Struct to pass arguments to worker threads
+typedef struct {
+    int client_socket;
+    uint64_t request_id;
+    SSL* ssl;
+} thread_args_t;
 
 // --- Structured Logging Function ---
 void log_message(const char* level, uint64_t thread_id, const char* message) {
     time_t now = time(NULL);
     char time_buf[sizeof("2025-07-21T13:43:00Z")];
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
-    // Print log as a JSON object
     printf("{\"timestamp\":\"%s\", \"level\":\"%s\", \"source\":\"c_server\", \"thread_id\":%llu, \"message\":\"%s\"}\n",
            time_buf, level, thread_id, message);
-    fflush(stdout); // Ensure logs are written immediately
+    fflush(stdout);
 }
 
 // --- Auto-Certificate Generation ---
 void check_and_generate_certs() {
-    if (access("cert.pem", F_OK) == -1 || access("key.pem", F_OK) == -1) {
+    if (access(config.cert_file, F_OK) == -1 || access(config.key_file, F_OK) == -1) {
         log_message("INFO", 0, "SSL certificate not found. Generating self-signed certificate...");
-        const char* command = "openssl req -x509 -newkey rsa:4096 -nodes "
-                              "-keyout key.pem -out cert.pem "
-                              "-sha256 -days 365 "
-                              "-subj \"/C=US/ST=CA/L=SF/O=toolB/CN=localhost\" > /dev/null 2>&1";
+        char command[512];
+        snprintf(command, sizeof(command),
+                 "openssl req -x509 -newkey rsa:4096 -nodes "
+                 "-keyout %s -out %s "
+                 "-sha256 -days 365 "
+                 "-subj \"/C=US/ST=CA/L=SF/O=toolB/CN=localhost\" > /dev/null 2>&1",
+                 config.key_file, config.cert_file);
         if (system(command) != 0) {
             log_message("FATAL", 0, "Failed to generate SSL certificate. Please ensure OpenSSL is installed.");
             exit(EXIT_FAILURE);
@@ -52,11 +68,6 @@ void check_and_generate_certs() {
         log_message("INFO", 0, "Certificate generated successfully.");
     }
 }
-
-// --- Function Prototypes & Structs ---
-extern void http_parse_request(RequestMessage* msg, const char* request_str);
-void* handle_connection(void* client_socket_ptr);
-typedef struct { int client_socket; uint64_t request_id; SSL* ssl; } thread_args_t;
 
 void cleanup_on_signal(int signum) {
     printf("\n");
@@ -75,18 +86,20 @@ void cleanup_on_signal(int signum) {
 }
 
 void init_openssl() { SSL_load_error_strings(); OpenSSL_add_ssl_algorithms(); }
+
 SSL_CTX* create_ssl_context() {
     const SSL_METHOD* method = TLS_server_method();
     SSL_CTX* ctx = SSL_CTX_new(method);
     if (!ctx) { log_message("FATAL", 0, "Unable to create SSL context"); ERR_print_errors_fp(stderr); exit(EXIT_FAILURE); }
     return ctx;
 }
+
 void configure_ssl_context(SSL_CTX* ctx) {
-    if (SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) <= 0) {
-        log_message("FATAL", 0, "Failed to load cert.pem"); ERR_print_errors_fp(stderr); exit(EXIT_FAILURE);
+    if (SSL_CTX_use_certificate_file(ctx, config.cert_file, SSL_FILETYPE_PEM) <= 0) {
+        log_message("FATAL", 0, "Failed to load certificate file from config."); ERR_print_errors_fp(stderr); exit(EXIT_FAILURE);
     }
-    if (SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) <= 0) {
-        log_message("FATAL", 0, "Failed to load key.pem"); ERR_print_errors_fp(stderr); exit(EXIT_FAILURE);
+    if (SSL_CTX_use_PrivateKey_file(ctx, config.key_file, SSL_FILETYPE_PEM) <= 0) {
+        log_message("FATAL", 0, "Failed to load private key file from config."); ERR_print_errors_fp(stderr); exit(EXIT_FAILURE);
     }
 }
 
@@ -118,7 +131,7 @@ void* handle_connection(void* args_ptr) {
 
         time_t start_time = time(NULL);
         int found_response = 0;
-        while(time(NULL) - start_time < REQUEST_TIMEOUT_SECONDS) {
+        while(time(NULL) - start_time < config.timeout_seconds) {
             pthread_mutex_lock(&response_buffer_mutex);
             if (shm_ptr->response_buffer.tail != shm_ptr->response_buffer.head) {
                 ResponseMessage* res = &shm_ptr->response_buffer.responses[shm_ptr->response_buffer.tail % RES_BUFFER_CAPACITY];
@@ -153,7 +166,11 @@ void* handle_connection(void* args_ptr) {
 
 int main() {
     signal(SIGINT, cleanup_on_signal);
-    log_message("INFO", 0, "Initializing toolB server...");
+
+    load_config("toolb.conf");
+    char log_buf[256];
+    sprintf(log_buf, "Initializing toolB server with config from toolb.conf");
+    log_message("INFO", 0, log_buf);
 
     check_and_generate_certs();
     init_openssl();
@@ -174,10 +191,12 @@ int main() {
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(8080);
+    address.sin_port = htons(config.port);
     bind(server_fd, (struct sockaddr *)&address, sizeof(address));
     listen(server_fd, 30);
-    log_message("INFO", 0, "Server listening on https://localhost:8080");
+
+    sprintf(log_buf, "Server listening on https://localhost:%d", config.port);
+    log_message("INFO", 0, log_buf);
 
     while (1) {
         log_message("DEBUG", 0, "Waiting for new connection...");
