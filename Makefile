@@ -1,47 +1,64 @@
-# Makefile for toolB (Concurrent C-Parser Version)
+# Makefile for toolB (Config-driven, HTTPS Enabled, Dual-Arch)
 
 # Compiler
 CC = gcc
+GO = go
 
-# Flags - Added -pthread for multi-threading
-CFLAGS = -Wall -Isrc/include -O2 -pthread
+# --- Architecture-Aware Configuration for macOS ---
+ARCH = $(shell uname -m)
+ifeq ($(ARCH),arm64)
+	HOMEBREW_PREFIX = /opt/homebrew
+else
+	HOMEBREW_PREFIX = /usr/local
+endif
+OPENSSL_DIR = $(HOMEBREW_PREFIX)/opt/openssl@3
+
+# Flags
+CFLAGS = -Wall -Isrc/include -O2 -pthread -I$(OPENSSL_DIR)/include
+LDFLAGS = -L$(OPENSSL_DIR)/lib -lssl -lcrypto
 
 # Directories
 BIN_DIR = bin
 APP_DIR = app
+MONITOR_DIR = monitor
 
 # Source files
-C_SOURCES = src/heartware_server.c src/c_parser.c
+C_SOURCES = src/heartware_server.c src/c_parser.c src/config.c src/ini.c
 C_OBJS = $(C_SOURCES:.c=.o)
-TARGET = $(BIN_DIR)/heartware_server
+C_TARGET = $(BIN_DIR)/heartware_server
+GO_TARGET = $(BIN_DIR)/monitor
 
 # Default target
-all: $(TARGET)
+all: $(C_TARGET)
 
-# Rule to link the final executable
-$(TARGET): $(C_OBJS)
+# Rule to link the C executable
+$(C_TARGET): $(C_OBJS)
 	@mkdir -p $(BIN_DIR)
-	$(CC) -o $(TARGET) $(C_OBJS) $(CFLAGS)
-	$(CC) -o $(TARGET) $(C_OBJS) $(CFLAGS) $(LIBS)
-	@echo "✅ toolB Concurrent Server compiled successfully -> $(TARGET)"
+	$(CC) -o $(C_TARGET) $(C_OBJS) $(CFLAGS) $(LDFLAGS)
+	@echo "✅ toolB Concurrent Server compiled successfully for $(ARCH) -> $(C_TARGET)"
 
 # Generic rule to compile any .c file into a .o file
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Rule to build the Go monitor
+build-monitor:
+	@echo "🛠️  Building Go monitor..."
+	@cd $(MONITOR_DIR) && $(GO) build -o ../$(GO_TARGET) .
+	@echo "✅ Go monitor compiled successfully -> $(GO_TARGET)"
+
 # --- Target Commands ---
 run-server: all
 	@echo "🚀 Starting toolB C-Server..."
-	@./$(TARGET)
+	@./$(C_TARGET)
 
-# UPDATED: This target now runs the new main.py application runner
 run-app:
 	@echo "🐍 Starting Python Application Server..."
 	@python3 $(APP_DIR)/main.py
 
-run-monitor:
-	@echo "📊 Starting Live Monitor..."
-	@python3 $(APP_DIR)/monitor.py
+run-monitor: build-monitor
+	@echo "📊 Starting Live Go Monitor..."
+	@./$(GO_TARGET)
 
 clean:
 	@echo "🧹 Cleaning up..."
@@ -49,4 +66,4 @@ clean:
 	@rm -rf $(BIN_DIR)
 	@echo "Cleanup complete."
 
-.PHONY: all run-server run-app clean run-monitor
+.PHONY: all run-server run-app clean run-monitor build-monitor

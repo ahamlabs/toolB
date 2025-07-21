@@ -8,6 +8,7 @@ import signal
 import asyncio
 import multiprocessing
 import importlib
+import configparser
 from toolb_shm_structs import SharedMemoryLayout, REQ_BUFFER_CAPACITY, RES_BUFFER_CAPACITY, SHM_NAME, SEM_REQUEST_READY
 
 # --- C Function Wrappers for Semaphores ---
@@ -27,6 +28,8 @@ else:
 
 # --- Worker Process Function ---
 def worker_process(app_path, task_queue, response_queue):
+    """A worker process that runs the ASGI application."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     module_str, app_str = app_path.split(":")
     module = importlib.import_module(module_str)
     app = getattr(module, app_str)
@@ -43,6 +46,7 @@ def worker_process(app_path, task_queue, response_queue):
     print(f"🛑 [Worker {os.getpid()}] Shutting down.")
 
 async def _asgi_dispatch(app, request_data):
+    """Translates a request dictionary into an ASGI call."""
     response_future = asyncio.Future()
     response_dict = {}
 
@@ -65,8 +69,9 @@ async def _asgi_dispatch(app, request_data):
     return final_response
 
 class ToolBServer:
-    def __init__(self, app_path):
+    def __init__(self, app_path, config):
         self.app_path = app_path
+        self.config = config
         self.shm = None
         self.req_buffer = None
         self.res_buffer = None
@@ -75,26 +80,38 @@ class ToolBServer:
         self.processes = []
 
     def _connect_to_ipc(self):
+        """Connects to the shared memory and semaphore created by the C server."""
         shm_open_c = libc.shm_open
         shm_open_c.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
         shm_open_c.restype = ctypes.c_int
         O_RDWR = 2
-        fd = shm_open_c(SHM_NAME.encode('utf-8'), O_RDWR, 0o666)
-        if fd < 0: sys.exit(1)
+
+        shm_name = self.config.get('ipc', 'shm_name', fallback='/toolb_ipc')
+        sem_name = self.config.get('ipc', 'sem_name', fallback='/toolb_sem_req')
+
+        fd = shm_open_c(shm_name.encode('utf-8'), O_RDWR, 0o666)
+        if fd < 0:
+            print(f"🔴 [Dispatcher] FATAL: Could not open shared memory '{shm_name}'. Is the C server running?")
+            sys.exit(1)
+
         mm = mmap.mmap(fd, ctypes.sizeof(SharedMemoryLayout), mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
         self.shm = SharedMemoryLayout.from_buffer(mm)
         self.req_buffer = self.shm.request_buffer
         self.res_buffer = self.shm.response_buffer
-        self.request_sem = sem_open(SEM_REQUEST_READY.encode('utf-8'), O_RDWR)
-        if self.request_sem == -1: sys.exit(1)
+
+        self.request_sem = sem_open(sem_name.encode('utf-8'), O_RDWR)
+        if self.request_sem == -1:
+            print(f"🔴 [Dispatcher] FATAL: Could not open semaphore '{sem_name}'. Is the C server running?")
+            sys.exit(1)
+
         print("✅ [Dispatcher] Connected to IPC.")
 
-    def run(self, num_workers=None):
+    def run(self):
+        """The main server loop."""
         if sys.platform == 'win32':
             raise NotImplementedError("toolB server is not supported on Windows.")
 
-        if num_workers is None:
-            num_workers = os.cpu_count()
+        num_workers = self.config.getint('python_app', 'num_workers', fallback=os.cpu_count())
 
         print(f"🚀 [Dispatcher] Starting server with {num_workers} worker processes.")
 
@@ -128,11 +145,10 @@ class ToolBServer:
                     self.res_buffer.head = (res_head + 1) % RES_BUFFER_CAPACITY
                     print(f"➡️  [Dispatcher] Sent response #{response_msg.request_id} to C.")
             except multiprocessing.queues.Empty:
-                pass # This is expected, just means the queue is empty
+                pass
 
             # --- Step 2: Check for new requests from the C server ---
             if sem_trywait(self.request_sem) == 0:
-                # A signal was received, so process the request buffer
                 current_head = self.req_buffer.head
                 current_tail = self.req_buffer.tail
 
@@ -154,7 +170,6 @@ class ToolBServer:
 
                 self.req_buffer.tail = current_tail
             else:
-                # No signal from C server, sleep briefly to prevent busy-looping
                 time.sleep(0.001)
 
         # --- Robust Shutdown Sequence ---
