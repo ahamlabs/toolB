@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>toolB :: SYSTEM MONITOR</title>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      /* "Cyan on Deep Blue" Dark Theme (Default) */
+      --monitor-bg: #0d1a26;
+      --monitor-text: #00ffff;
+      --monitor-glow: rgba(0, 255, 255, 0.4);
+      --monitor-dim: #008b8b;
+      --bar-bg: #003333;
+      --card-bg: rgba(0, 20, 20, 0.2);
+      --log-source-color: #00ff41; /* Green for source in blue theme */
+    }
+
+    /* "Amber on Parchment" Light Theme */
+    body.light-theme {
+      --monitor-bg: #f0e8d0;
+      --monitor-text: #c28b1e;
+      --monitor-glow: rgba(255, 165, 0, 0.4);
+      --monitor-dim: #9e6f18;
+      --bar-bg: #d9cba9;
+      --card-bg: rgba(255, 248, 220, 0.2);
+      --log-source-color: #0e7490;
+    }
+
+    body {
+      background-color: var(--monitor-bg);
+      color: var(--monitor-text);
+      font-family: 'Source Code Pro', monospace;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 1rem;
+      overflow: hidden;
+      text-shadow: 0 0 4px var(--monitor-glow);
+      transition: background-color 0.3s, color 0.3s;
+    }
+
+    .crt-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background:
+              linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+              linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+      background-size: 100% 3px, 3px 100%;
+      pointer-events: none;
+      z-index: 100;
+      animation: flicker 0.1s infinite;
+    }
+
+    @keyframes flicker {
+      0%, 100% { opacity: 0.8; }
+      50% { opacity: 0.95; }
+    }
+
+    .container {
+      width: 100%;
+      max-width: 800px;
+      border: 2px solid var(--monitor-dim);
+      padding: 1rem;
+      box-shadow: inset 0 0 20px var(--monitor-glow), 0 0 20px var(--monitor-dim);
+      position: relative;
+      background-color: var(--card-bg);
+      transition: border-color 0.3s, box-shadow 0.3s, background-color 0.3s;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 1rem;
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    .blinking-cursor {
+      animation: blink 1s step-end infinite;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    nav {
+      border-top: 1px solid var(--monitor-dim);
+      border-bottom: 1px solid var(--monitor-dim);
+      padding: 0.5rem 0;
+      margin-bottom: 1rem;
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      align-items: center;
+    }
+
+    nav button {
+      background: none;
+      border: none;
+      color: var(--monitor-text);
+      font-family: inherit;
+      font-size: 1.1rem;
+      cursor: pointer;
+      text-shadow: inherit;
+      padding: 4px 8px;
+      transition: all 0.2s ease;
+    }
+
+    nav button.active {
+      background-color: var(--monitor-text);
+      color: var(--monitor-bg);
+      text-shadow: none;
+    }
+
+    #theme-toggle {
+      border: 1px solid var(--monitor-dim);
+    }
+
+    .card {
+      border: 1px solid var(--monitor-dim);
+      margin-bottom: 1rem;
+      padding: 0.5rem 1rem;
+    }
+
+    h2 {
+      margin: 0.5rem 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .bar-container {
+      background-color: var(--bar-bg);
+      height: 20px;
+      width: 100%;
+      margin: 0.5rem 0;
+    }
+
+    .bar {
+      background-color: var(--monitor-text);
+      height: 100%;
+      width: 0%;
+      box-shadow: 0 0 10px var(--monitor-glow);
+      transition: width 0.3s linear;
+    }
+
+    .pointers {
+      color: var(--monitor-dim);
+      font-size: 0.9rem;
+    }
+
+    .log-container {
+      height: 40vh;
+      background-color: rgba(0, 0, 0, 0.1);
+      overflow-y: auto;
+      border: 1px solid var(--monitor-dim);
+      padding: 0.5rem;
+      font-size: 16px;
+    }
+
+    .log-line { display: block; }
+    .log-level-INFO { color: var(--monitor-text); }
+    .log-level-WARN { color: #ffff00; text-shadow: 0 0 5px #ffff00; }
+    body.light-theme .log-level-WARN { color: #d97706; text-shadow: 0 0 5px #d97706; }
+    .log-level-ERROR, .log-level-FATAL { color: #ff0000; text-shadow: 0 0 5px #ff0000; }
+    body.light-theme .log-level-ERROR, body.light-theme .log-level-FATAL { color: #b91c1c; text-shadow: 0 0 5px #b91c1c; }
+    .log-source { color: var(--log-source-color); text-shadow: 0 0 5px var(--log-source-color); }
+
+    #gemini-output {
+      color: #ff00ff; /* Magenta for AI */
+      text-shadow: 0 0 5px #ff00ff;
+      min-height: 50px;
+    }
+    body.light-theme #gemini-output { color: #9333ea; text-shadow: 0 0 5px #9333ea; }
+
+    #analyze-btn {
+      background-color: var(--monitor-dim);
+      border: 1px solid var(--monitor-text);
+      color: var(--monitor-text);
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 1rem;
+      cursor: pointer;
+      margin-top: 1rem;
+    }
+    #analyze-btn:disabled {
+      color: var(--monitor-dim);
+      cursor: not-allowed;
+    }
+
+  </style>
+</head>
+<body>
+<div class="crt-overlay"></div>
+<div class="container">
+  <header>
+    <h1>toolB System Monitor<span class="blinking-cursor">_</span></h1>
+  </header>
+
+  <nav>
+    <button id="nav-dashboard" class="active">Dashboard</button>
+    <button id="nav-logs">Logs</button>
+    <button id="theme-toggle">[ Toggle Theme ]</button>
+  </nav>
+
+  <main>
+    <!-- Dashboard View -->
+    <div id="dashboard-view">
+      <div class="card">
+        <h2>Request Buffer [C -> Py]</h2>
+        <div class="bar-container"><div id="req-bar" class="bar"></div></div>
+        <span id="req-stats">0/16</span> <span id="req-pointers" class="pointers"></span>
+      </div>
+      <div class="card">
+        <h2>Response Buffer [Py -> C]</h2>
+        <div class="bar-container"><div id="res-bar" class="bar"></div></div>
+        <span id="res-stats">0/16</span> <span id="res-pointers" class="pointers"></span>
+      </div>
+    </div>
+
+    <!-- Logs View -->
+    <div id="logs-view" style="display: none;">
+      <div class="card">
+        <h2>System Log Stream</h2>
+        <div id="log-output" class="log-container"></div>
+      </div>
+      <div class="card">
+        <h2>Gemini Analysis</h2>
+        <pre id="gemini-output">Awaiting analysis...</pre>
+        <button id="analyze-btn">Analyze Log Buffer</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  // --- Theme Management ---
+  const themeToggle = document.getElementById('theme-toggle');
+  const body = document.body;
+
+  function applyTheme(theme) {
+    if (theme === 'light') {
+      body.classList.add('light-theme');
+    } else {
+      body.classList.remove('light-theme');
+    }
+  }
+
+  themeToggle.addEventListener('click', () => {
+    const currentTheme = body.classList.contains('light-theme') ? 'light' : 'dark';
+    const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+    localStorage.setItem('toolb-theme', newTheme);
+    applyTheme(newTheme);
+  });
+
+  // Apply saved theme on load
+  const savedTheme = localStorage.getItem('toolb-theme') || 'dark';
+  applyTheme(savedTheme);
+
+
+  // --- Application Logic ---
+  const dashboardView = document.getElementById('dashboard-view');
+  const logsView = document.getElementById('logs-view');
+  const navDashboard = document.getElementById('nav-dashboard');
+  const navLogs = document.getElementById('nav-logs');
+  let currentLogs = [];
+
+  function switchView(view) {
+    if (view === 'dashboard') {
+      dashboardView.style.display = 'block';
+      logsView.style.display = 'none';
+      navDashboard.classList.add('active');
+      navLogs.classList.remove('active');
+    } else {
+      dashboardView.style.display = 'none';
+      logsView.style.display = 'block';
+      navDashboard.classList.remove('active');
+      navLogs.classList.add('active');
+    }
+  }
+
+  navDashboard.addEventListener('click', () => switchView('dashboard'));
+  navLogs.addEventListener('click', () => switchView('logs'));
+
+  function updateDashboard() {
+    fetch('/dashboard')
+            .then(response => response.json())
+            .then(data => {
+              document.getElementById('req-bar').style.width = `${(data.req_count / data.req_capacity) * 100}%`;
+              document.getElementById('req-stats').textContent = `${data.req_count}/${data.req_capacity}`;
+              document.getElementById('req-pointers').textContent = `(H:0x${data.req_head.toString(16)}, T:0x${data.req_tail.toString(16)})`;
+
+              document.getElementById('res-bar').style.width = `${(data.res_count / data.res_capacity) * 100}%`;
+              document.getElementById('res-stats').textContent = `${data.res_count}/${data.res_capacity}`;
+              document.getElementById('res-pointers').textContent = `(H:0x${data.res_head.toString(16)}, T:0x${data.res_tail.toString(16)})`;
+            }).catch(console.error);
+  }
+
+  function updateLogs() {
+    fetch('/logs')
+            .then(response => response.json())
+            .then(logs => {
+              currentLogs = logs;
+              const logOutput = document.getElementById('log-output');
+              logOutput.innerHTML = '';
+              logs.reverse().forEach(log => {
+                const line = document.createElement('div');
+                line.className = 'log-line';
+                line.innerHTML = `<span class="log-level-${log.level}">${log.level}</span> <span class="log-source">[${log.source}]</span>: ${log.message}`;
+                logOutput.appendChild(line);
+              });
+            }).catch(console.error);
+  }
+
+  document.getElementById('analyze-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('analyze-btn');
+    const output = document.getElementById('gemini-output');
+    btn.disabled = true;
+    output.textContent = 'ANALYZING...';
+    try {
+      const response = await fetch('/analyze-logs', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ logs: currentLogs }),
+      });
+      const result = await response.json();
+      output.textContent = result.analysis;
+    } catch (error) {
+      output.textContent = 'ERROR: Could not connect to Gemini API.';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  setInterval(updateDashboard, 1000);
+  setInterval(updateLogs, 3000);
+  updateDashboard();
+  updateLogs();
+</script>
+</body>
+</html>
