@@ -1,4 +1,4 @@
-# Makefile for toolB (Config-driven, HTTPS Enabled, Dual-Arch)
+# Makefile for toolB (Hot Reloading Enabled)
 
 # Compiler
 CC = gcc
@@ -52,9 +52,10 @@ run-server: all
 	@echo "🚀 Starting toolB C-Server..."
 	@./$(C_TARGET)
 
+# UPDATED: This target now runs the main.py script with the --reload flag
 run-app:
-	@echo "🐍 Starting Python Application Server..."
-	@python3 $(APP_DIR)/main.py
+	@echo "🐍 Starting Python Application Server with Hot Reloading..."
+	@python3 $(APP_DIR)/main.py --reload
 
 run-monitor: build-monitor
 	@echo "📊 Starting Live Go Monitor..."

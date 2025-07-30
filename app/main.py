@@ -10,7 +10,7 @@ app = FastAPI()
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI running on toolB!"}
+    return {"message": "Hello reload!"}
 
 @app.get("/api/users")
 def get_user(id: int, role: Optional[str] = None):
@@ -26,14 +26,17 @@ async def create_data(request: Request):
 
 # Run the app with the ToolBServer
 if __name__ == "__main__":
-    # --- Load Configuration ---
-    config = configparser.ConfigParser()
-    config.read('toolb.conf')
+    # --- Hot Reloading Flag ---
+    # Set this to True for development to enable automatic restarts on code changes.
+    # Set to False for production.
+    RELOAD_ENABLED = True
 
     # "spawn" is the safest, most portable start method
     multiprocessing.set_start_method("spawn", force=True)
 
+    config = configparser.ConfigParser()
+    config.read('toolB.conf')
+
     print("🚀 Launching FastAPI app with ToolBServer...")
-    # Pass the config object to the server
     server = ToolBServer(app_path="main:app", config=config)
-    server.run()
+    server.run(reload=RELOAD_ENABLED)
